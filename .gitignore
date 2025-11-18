@@ -208,7 +208,6 @@ __marimo__/
 
 # --- IGNORE ---
 plan.md
-mnt/data1/LeakDB/
 leakdb
 fcvae
-data/
+data/processed/
