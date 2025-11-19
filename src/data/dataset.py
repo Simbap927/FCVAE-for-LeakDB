@@ -23,17 +23,23 @@ class LeakDBDataset(Dataset):
         self,
         csv_file: str,
         window_size: int = 96,
-        stride: int = 1
+        stride: int = 1,
+        mode: str = "train",
+        use_label: bool = False
     ):
         """
         Args:
-            csv_file: 전처리된 CSV 경로 (train_processed.csv, val_processed.csv, test_processed.csv)
+            csv_file: 전처리된 CSV 경로
             window_size: 윈도우 크기 (기본값: 96 = 48시간, 30분 간격)
             stride: 슬라이딩 윈도우 스트라이드 (기본값: 1)
+            mode: "train", "valid", "test"
+            use_label: True면 실제 라벨 사용 (semi-supervised), False면 완전 비지도
         """
         self.csv_file = Path(csv_file)
         self.window_size = window_size
         self.stride = stride
+        self.mode = mode
+        self.use_label = use_label
 
         # 데이터 로드
         print(f"Loading dataset from {csv_file}...")
@@ -60,6 +66,9 @@ class LeakDBDataset(Dataset):
 
         # 라벨 분포 확인
         self._print_label_distribution()
+        
+        print(f"  Mode: {mode}")
+        print(f"  Use real labels: {use_label}")
 
     def _create_windows(self) -> List[Dict]:
         """
@@ -113,20 +122,25 @@ class LeakDBDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         인덱스에 해당하는 윈도우 데이터 반환
+        
+        원본 FCVAE 방식:
+        - Dataset은 원본 데이터만 반환 (증강 없음)
+        - 데이터 증강은 Training loop의 batch_data_augmentation()에서 처리
+        - use_label에 따라 값 전처리만 수행
 
         Args:
             idx: 윈도우 인덱스
 
         Returns:
             Dictionary with:
-                - values: [window_size] 스케일링된 수요 값 (ValueScaled)
-                - labels: [window_size] 바이너리 라벨 (0=정상, 1=누수)
-                - scenario: 시나리오 번호 (scalar)
-                - node: 노드 번호 (scalar)
+                - values: [window_size] 시계열 값 (전처리됨)
+                - labels: [window_size] 라벨 (y_all)
+                - missing: [window_size] 결측 마스크 (z_all)
+                - scenario, node: 메타데이터
         """
         window_info = self.windows[idx]
 
-        # 윈도우 데이터 추출 (start_idx부터 end_idx까지 inclusive)
+        # 윈도우 데이터 추출
         window_data = self.df.loc[
             window_info['start_idx']:window_info['end_idx']
         ]
@@ -138,15 +152,28 @@ class LeakDBDataset(Dataset):
                 f"got {len(window_data)} for window {idx}"
             )
 
-        # Tensor 변환
-        values = torch.FloatTensor(window_data['ValueScaled'].values)
+        # 기본 데이터
+        values = torch.FloatTensor(window_data['ValueScaled'].values).clone()
         labels = torch.FloatTensor(window_data['Label'].values)
+        missing = torch.zeros(self.window_size)  # LeakDB는 결측값 없음
+        
+        # === 원본 FCVAE 방식: use_label에 따른 전처리 ===
+        if (self.mode == "train" or self.mode == "valid"):
+            if self.use_label:
+                # Semi-supervised: 실제 이상치 위치의 값을 0으로
+                values[labels == 1] = 0.0
+            else:
+                # Unsupervised: 모든 라벨을 0으로 (라벨 무시)
+                labels = torch.zeros_like(labels)
+        
+        # Test mode: 원본 그대로 사용
 
         return {
-            'values': values,          # [window_size]
-            'labels': labels,          # [window_size]
-            'scenario': window_info['scenario'],  # scalar
-            'node': window_info['node']          # scalar
+            'values': values,           # [window_size] - 전처리된 값
+            'labels': labels,           # [window_size] - y_all
+            'missing': missing,         # [window_size] - z_all
+            'scenario': window_info['scenario'],
+            'node': window_info['node']
         }
 
     def get_window_info(self, idx: int) -> Dict:
