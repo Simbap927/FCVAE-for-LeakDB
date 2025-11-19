@@ -404,7 +404,9 @@ class ConditionalVAE(nn.Module):
         # m = |M| / N (valid ratio per sample)
         m = (mask.sum(dim=1, keepdim=True) / self.window_size).expand(-1, self.latent_dim)  # [batch, latent_dim]
         
-        # KL divergence per dimension
+        # KL divergence per dimension (원본 FCVAE 방식: Monte Carlo estimation)
+        # 원본은 샘플링된 z를 사용하여 ELBO를 추정함 (경험적으로 더 나은 성능)
+        # KL ≈ 0.5 * E[(z² - log(var) - (z-μ)²/var)]
         var = torch.exp(logvar) + 1e-7
         kl_per_dim = 0.5 * (z ** 2 - logvar - (z - mean) ** 2 / var)  # [batch, latent_dim]
         
@@ -422,51 +424,64 @@ class ConditionalVAE(nn.Module):
     def mcmc_inference(
         self,
         x: torch.Tensor,
-        n_samples: int = 128
+        n_samples: int = 128,
+        mcmc_mode: int = 2,
+        n_refine: int = 10
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        MCMC-based unsupervised inference for anomaly detection
+        MCMC-based unsupervised inference for anomaly detection (원본 FCVAE 방식)
         
-        This method performs Monte Carlo sampling to estimate the reconstruction
-        probability without using any label information. Used in test mode.
+        Two-stage process:
+        1. Input refinement (n_refine iterations): Iteratively refine input using reconstruction
+        2. Monte Carlo sampling (n_samples): Estimate probability distribution
         
         Args:
             x: [batch, 1, window_size] - Input time series
             n_samples: Number of MCMC samples (default: 128)
+            mcmc_mode: Refinement mode (0: adaptive, 1: threshold, 2: last-point only)
+            n_refine: Number of refinement iterations (default: 10)
         
         Returns:
             x: [batch, 1, window_size] - Input (unchanged)
             prob_all: [batch, 1, window_size] - Averaged log probability
         """
         origin_x = x.clone()
-        
-        # Extract frequency condition
         condition = self.condition_extractor(x)  # [batch, 1, 2*condition_dim]
         
-        # Initialize probability accumulator
-        prob_all = torch.zeros_like(x)
-        
-        # Monte Carlo sampling
-        for _ in range(n_samples):
-            # Encode
+        # === Stage 1: Input Refinement (원본 FCVAE의 10회 반복) ===
+        # 이 단계는 재구성이 잘 되는 부분을 찾아 점진적으로 입력을 정제
+        for _ in range(n_refine):
+            # Encode current input
             mean, logvar = self.encode(x, condition)
-            
-            # Sample latent
             z = self.reparameterize(mean, logvar)
-            
-            # Decode
             mu_x, logvar_x = self.decode(z, condition)
             
-            # Compute log probability: -0.5 * (log(σ²) + (x-μ)²/σ²)
+            # Compute reconstruction probability
+            var_x = torch.exp(logvar_x) + 1e-7
+            recon_prob = -0.5 * (logvar_x + (origin_x - mu_x) ** 2 / var_x)
+            
+            # Update input based on mcmc_mode
+            if mcmc_mode == 2:  # Default: only update last timestep
+                # 마지막 시점만 재구성 값으로 교체, 나머지는 원본 유지
+                mask = torch.ones_like(origin_x)
+                mask[:, :, -1] = 0
+                x = origin_x * mask + mu_x * (1 - mask)
+            # mcmc_mode 0, 1은 생략 (기본값 2만 사용)
+        
+        # === Stage 2: Monte Carlo Sampling ===
+        # 정제된 입력으로 한 번만 인코딩 후 128회 샘플링
+        mean, logvar = self.encode(x, condition)
+        prob_all = torch.zeros_like(origin_x)
+        
+        for _ in range(n_samples):
+            z = self.reparameterize(mean, logvar)
+            mu_x, logvar_x = self.decode(z, condition)
+            
             var_x = torch.exp(logvar_x) + 1e-7
             log_prob = -0.5 * (logvar_x + (origin_x - mu_x) ** 2 / var_x)
-            
-            # Accumulate
             prob_all += log_prob
         
-        # Average over samples
         prob_all = prob_all / n_samples
-        
         return origin_x, prob_all
 
     def compute_anomaly_score(

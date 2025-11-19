@@ -110,14 +110,15 @@ def segment_anomaly(x, y, z, rate, method="swap"):
             torch.empty(0, window_size, device=x.device)
         )
     
-    # 서로 다른 샘플 쌍 선택
+    # 서로 다른 샘플 쌍 선택 (벡터화)
     idx_1 = torch.randint(low=0, high=batch_size, size=(aug_size,))
     idx_2 = torch.randint(low=0, high=batch_size, size=(aug_size,))
     
-    # 같은 인덱스가 선택되지 않도록 보장
-    for i in range(aug_size):
-        while idx_1[i] == idx_2[i]:
-            idx_2[i] = torch.randint(low=0, high=batch_size, size=(1,))[0]
+    # 같은 인덱스가 선택되지 않도록 보장 (벡터화된 재샘플링)
+    same_mask = (idx_1 == idx_2)
+    while same_mask.any():
+        idx_2[same_mask] = torch.randint(low=0, high=batch_size, size=(same_mask.sum().item(),))
+        same_mask = (idx_1 == idx_2)
     
     x_aug = x[idx_1].clone()
     y_aug = y[idx_1].clone()

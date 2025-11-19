@@ -1,0 +1,57 @@
+# FCVAE Configuration for LeakDB
+# Default settings based on plan.md and original FCVAE
+
+# Data Configuration
+data:
+  train_csv: "data/processed/net1/train_processed.csv"
+  val_csv: "data/processed/net1/val_processed.csv"
+  window_size: 96          # 48 hours with 30-min intervals
+  stride: 48               # Sliding window stride
+  batch_size: 512          # Original FCVAE batch size
+  num_workers: 4           # DataLoader workers
+  use_label: false         # Unsupervised learning (ignore real labels)
+
+# Model Architecture (Original FCVAE)
+model:
+  window_size: 96
+  latent_dim: 8            # Latent space dimension
+  condition_dim: 16        # Condition embedding per feature (global/local)
+  hidden_dim: 100          # Encoder/Decoder hidden dimension
+  d_model: 256             # Attention model dimension
+  d_ff: 512                # Feed-forward dimension
+  n_head: 8                # Number of attention heads
+  kernel_size: 16          # Local FFT kernel size
+  stride: 8                # Local FFT stride
+  dropout: 0.05            # Dropout rate
+  kl_weight: 0.005         # KL divergence weight in CM-ELBO
+
+# Training Configuration
+training:
+  learning_rate: 0.0005    # Adam learning rate
+  max_epochs: 50           # Maximum training epochs
+  gradient_clip_val: 2.0   # Gradient clipping
+  accumulate_grad_batches: 1
+  
+  # Data Augmentation (Self-Supervised Learning)
+  # Original FCVAE: Inject fake anomalies during training
+  missing_rate: 0.01       # 1% missing data injection
+  point_rate: 0.05         # 5% point anomaly injection
+  segment_rate: 0.1        # 10% segment anomaly injection
+
+# Callbacks
+callbacks:
+  early_stopping_patience: 10  # Stop if no improvement for 10 epochs
+  checkpoint_top_k: 3          # Save top 3 models
+  lr_monitor: true             # Monitor learning rate
+
+# Logging
+logging:
+  log_dir: "logs"
+  experiment_name: "fcvae_net1"
+  save_dir: "checkpoints"
+
+# Hardware
+hardware:
+  accelerator: "auto"      # 'auto', 'gpu', 'cpu', 'mps'
+  devices: 1               # Number of devices
+  precision: "32-true"     # '32-true', '16-mixed', 'bf16-mixed'

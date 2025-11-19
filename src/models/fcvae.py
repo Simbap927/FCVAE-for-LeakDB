@@ -95,7 +95,7 @@ class FCVAE(nn.Module):
         if mode in ["train", "valid"]:
             # === Semi-supervised: CM-ELBO with partial labels ===
             # CVAE forward pass
-            mu_x, logvar_x, recon, mean, logvar, z = self.cvae(x, mode=mode)
+            mu_x, logvar_x, recon, mean, logvar, z = self.cvae(x)
 
             # Compute CM-ELBO loss
             loss = self.cvae.compute_loss(
@@ -108,7 +108,7 @@ class FCVAE(nn.Module):
         
         else:
             # === Unsupervised: MCMC inference ===
-            x_out, prob = self.cvae(x, mode=mode)
+            x_out, prob = self.cvae.mcmc_inference(x, n_samples=128)
             return x_out, prob
 
     def compute_anomaly_scores(

@@ -150,7 +150,11 @@ class FCVAETrainer(pl.LightningModule):
     def configure_optimizers(self):
         """Optimizer and scheduler"""
         optimizer = Adam(self.parameters(), lr=self.learning_rate)
-        scheduler = CosineAnnealingLR(optimizer, T_max=10)
+        
+        # T_max는 trainer.max_epochs로 설정 (기본값 50)
+        # Trainer 초기화 후 실제 값이 설정됨
+        T_max = getattr(self.trainer, 'max_epochs', 50) if hasattr(self, 'trainer') else 50
+        scheduler = CosineAnnealingLR(optimizer, T_max=T_max)
         
         return {
             'optimizer': optimizer,

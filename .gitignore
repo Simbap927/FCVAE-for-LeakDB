@@ -211,3 +211,5 @@ plan.md
 leakdb
 fcvae
 data/processed/
+checkpoints/
+logs/

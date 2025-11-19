@@ -165,8 +165,7 @@ class LeakDBDataset(Dataset):
             else:
                 # Unsupervised: 모든 라벨을 0으로 (라벨 무시)
                 labels = torch.zeros_like(labels)
-        
-        # Test mode: 원본 그대로 사용
+        # Test mode: 항상 원본 라벨 유지 (use_label 설정 무시)
 
         return {
             'values': values,           # [window_size] - 전처리된 값
