@@ -213,3 +213,4 @@ fcvae
 data/processed/
 checkpoints/
 logs/
+evaluation_results/

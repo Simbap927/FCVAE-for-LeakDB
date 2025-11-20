@@ -29,79 +29,74 @@ from training.trainer import FCVAETrainer
 from evaluation.leakdb_scorer import LeakDBScorer
 
 
-def point_adjust(predict: np.ndarray, actual: np.ndarray) -> np.ndarray:
+def get_anomaly_segments(labels: np.ndarray) -> list:
     """
-    Point Adjustment (원본 FCVAE 방식)
-    이상 구간 내 일부만 탐지해도 전체 구간을 탐지한 것으로 간주
-    
-    Args:
-        predict: Binary predictions [N]
-        actual: Binary ground truth [N]
-    
-    Returns:
-        Adjusted predictions [N]
+    Ground Truth에서 이상 구간(Segment)의 시작과 끝 인덱스를 추출
     """
-    predict = predict.copy()
-    anomaly_state = False
-    
-    for i in range(len(predict)):
-        if actual[i] and predict[i] and not anomaly_state:
-            # 이상 구간 시작 지점 탐지 시
-            anomaly_state = True
-            # 역방향으로 이상 구간 시작점까지 True로 변경
-            for j in range(i, 0, -1):
-                if not actual[j]:
-                    break
-                predict[j] = True
-        elif not actual[i]:
-            anomaly_state = False
-        
-        if anomaly_state:
-            predict[i] = True
-    
-    return predict
+    # 0과 1의 변화 지점 찾기
+    diff = np.diff(labels.astype(int), prepend=0, append=0)
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    return list(zip(starts, ends))
+
+
+def point_adjust_fast(predict: np.ndarray, segments: list) -> np.ndarray:
+    """
+    Point Adjustment (고속화 버전)
+    - 반복문 대신 미리 계산된 세그먼트 정보를 사용하여 속도 개선
+    - 이상 구간 내 하나라도 1이 있으면 해당 구간 전체를 1로 변경
+    """
+    new_predict = predict.copy()
+    for start, end in segments:
+        # 해당 구간에 1이 하나라도 있으면
+        if np.any(new_predict[start:end]):
+            new_predict[start:end] = 1
+    return new_predict
 
 
 def find_optimal_threshold(
     scores: np.ndarray,
     labels: np.ndarray,
     metric: str = 'f1',
-    n_thresholds: int = 200,  # Reduced from 1000 for speed
+    n_thresholds: int = 2000,  # Restored to 2000 (Original FCVAE setting)
     use_point_adjust: bool = True
 ) -> tuple:
     """
-    최적 임계값 찾기 (최적화 버전)
+    최적 임계값 찾기
     
     Args:
         scores: Anomaly scores [N]
         labels: Ground truth labels [N]
         metric: Optimization metric ('f1', 'stpr', 'stnr')
-        n_thresholds: Number of thresholds to try (reduced for speed)
-        use_point_adjust: Apply point adjustment (FCVAE 원본 방식)
+        n_thresholds: Number of thresholds to try (2000 matches original paper)
+        use_point_adjust: Apply point adjustment
     
     Returns:
         (best_threshold, best_score, all_results)
     """
-    # Use percentile range like reference FCVAE (more robust)
-    max_th = np.percentile(scores, 99.5)
+    # Use percentile range like reference FCVAE
+    max_th = np.percentile(scores, 99.91) # Match original code (99.91)
     min_th = float(scores.min())
     thresholds = np.linspace(min_th, max_th, n_thresholds)
     
     scorer = LeakDBScorer()
     labels_int = labels.astype(int)
     
+    # Pre-calculate anomaly segments for fast point adjustment
+    segments = get_anomaly_segments(labels_int) if use_point_adjust else []
+    
     best_score = 0
     best_threshold = 0
     all_results = []
     
-    # Vectorized computation where possible
+    # Vectorized computation
     for threshold in tqdm(thresholds, desc=f"Finding optimal threshold ({metric})", 
                           ncols=80, leave=False):
         predictions = (scores > threshold).astype(int)
         
-        # Point Adjustment 적용 (원본 FCVAE 방식)
+        # Point Adjustment 적용 (고속화 버전)
         if use_point_adjust:
-            predictions = point_adjust(predictions, labels_int)
+            predictions = point_adjust_fast(predictions, segments)
         
         if metric == 'f1':
             score = scorer.compute_f1(labels_int, predictions)
@@ -130,7 +125,8 @@ def evaluate(
     batch_size: int = 128,
     num_workers: int = 4,
     device: str = 'cuda',
-    save_dir: str = 'evaluation_results'
+    save_dir: str = 'evaluation_results',
+    use_point_adjust: bool = True
 ):
     """
     메인 평가 함수
@@ -142,6 +138,7 @@ def evaluate(
         num_workers: DataLoader workers
         device: 'cuda' or 'cpu'
         save_dir: 결과 저장 디렉토리
+        use_point_adjust: Point Adjustment 적용 여부
     """
     print("\n" + "=" * 70)
     print("FCVAE Evaluation on LeakDB")
@@ -151,9 +148,12 @@ def evaluate(
     print(f"Device:     {device}")
     print("=" * 70)
     
-    # 디렉토리 생성
-    save_dir = Path(save_dir)
+    # 디렉토리 생성 (체크포인트 이름 + PA 여부로 하위 디렉토리 생성)
+    ckpt_name = Path(checkpoint_path).stem
+    pa_suffix = "_PA" if use_point_adjust else "_NoPA"
+    save_dir = Path(save_dir) / (ckpt_name + pa_suffix)
     save_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results will be saved to: {save_dir}")
     
     # 1. 모델 로드
     print("\n[1/4] Loading model...")
@@ -210,12 +210,13 @@ def evaluate(
             # Anomaly scores (이미 -log prob로 계산됨)
             window_scores = result['scores'].cpu().numpy()  # [batch]
             
-            all_scores.extend(window_scores)
-            all_labels.extend(y_last)
+            # 1D 배열로 flatten하여 추가
+            all_scores.append(window_scores.flatten())
+            all_labels.append(y_last.flatten())
     
-    # NumPy 배열로 변환
-    all_scores = np.array(all_scores)
-    all_labels = np.array(all_labels)
+    # NumPy 배열로 변환 (concatenate로 1D 보장)
+    all_scores = np.concatenate(all_scores)
+    all_labels = np.concatenate(all_labels)
     
     print(f"✓ Inference complete")
     print(f"  Total windows:   {len(all_scores):,}")
@@ -225,19 +226,24 @@ def evaluate(
     # 4. 평가
     print("\n[4/4] Evaluating...")
     
-    # 최적 임계값 찾기 (F1 최대화) - 200개로 축소하여 속도 개선
+    # 최적 임계값 찾기 (F1 최대화) - 원본과 동일하게 2000개 탐색
     best_threshold, best_f1, threshold_results = find_optimal_threshold(
         all_scores,
         all_labels,
         metric='f1',
-        n_thresholds=200  # Reduced from 1000 for 5x speedup
+        n_thresholds=2000,  # Restored to 2000
+        use_point_adjust=use_point_adjust
     )
     
     print(f"\n✓ Optimal threshold: {best_threshold:.6f} (F1={best_f1:.2f}%)")
     
-    # 최적 임계값으로 예측 (Point Adjustment 적용)
+    # 최적 임계값으로 예측
     final_predictions = (all_scores > best_threshold).astype(int)
-    final_predictions = point_adjust(final_predictions, all_labels)
+    
+    # Point Adjustment 적용 여부
+    if use_point_adjust:
+        segments = get_anomaly_segments(all_labels.astype(int))
+        final_predictions = point_adjust_fast(final_predictions, segments)
     
     # LeakDB 메트릭 계산
     scorer = LeakDBScorer(tw_ex=10, sed_thr=0.75)
@@ -295,7 +301,7 @@ def evaluate(
     print("\nGenerating plots...")
     
     # 1. Score distribution (샘플링하여 메모리 효율화)
-    plt.figure(figsize=(12, 4))
+    plt.figure(figsize=(18, 6))
     
     plt.subplot(1, 3, 1)
     # 대용량 데이터의 경우 샘플링
@@ -308,37 +314,52 @@ def evaluate(
     if len(anomaly_scores) > max_hist_samples:
         anomaly_scores = np.random.choice(anomaly_scores, max_hist_samples, replace=False)
     
-    plt.hist(normal_scores, bins=50, alpha=0.7, label='Normal', color='blue')
-    plt.hist(anomaly_scores, bins=50, alpha=0.7, label='Anomaly', color='red')
-    plt.axvline(best_threshold, color='green', linestyle='--', label=f'Threshold={best_threshold:.3f}')
-    plt.xlabel('Anomaly Score')
-    plt.ylabel('Count')
-    plt.title('Anomaly Score Distribution (Sampled)')
-    plt.legend()
+    plt.hist(normal_scores, bins=50, alpha=0.6, label='Normal', color='skyblue')
+    plt.hist(anomaly_scores, bins=50, alpha=0.6, label='Anomaly', color='salmon')
+    plt.axvline(best_threshold, color='green', linestyle='--', linewidth=2, label=f'Threshold={best_threshold:.3f}')
+    plt.xlabel('Anomaly Score', fontsize=12)
+    plt.ylabel('Count', fontsize=12)
+    plt.title('Anomaly Score Distribution (Sampled)', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=10)
     plt.grid(True, alpha=0.3)
     
     # 2. Threshold vs F1
     plt.subplot(1, 3, 2)
     thresholds = [r['threshold'] for r in threshold_results]
     f1_scores = [r['score'] for r in threshold_results]
-    plt.plot(thresholds, f1_scores, linewidth=2)
-    plt.axvline(best_threshold, color='red', linestyle='--', label=f'Best: {best_threshold:.3f}')
-    plt.xlabel('Threshold')
-    plt.ylabel('F1 Score (%)')
-    plt.title(f'Threshold Optimization (Best F1={best_f1:.2f}%)')
-    plt.legend()
+    plt.plot(thresholds, f1_scores, linewidth=3, color='dodgerblue')
+    plt.axvline(best_threshold, color='red', linestyle='--', linewidth=2, label=f'Best: {best_threshold:.3f}')
+    plt.xlabel('Threshold', fontsize=12)
+    plt.ylabel('F1 Score (%)', fontsize=12)
+    plt.title(f'Threshold Optimization (Best F1={best_f1:.2f}%)', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=10)
     plt.grid(True, alpha=0.3)
     
     # 3. Confusion Matrix
     plt.subplot(1, 3, 3)
     cm = np.array([[TN, FP], [FN, TP]])
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+    
+    # Row-normalized (Recall per class) for better visibility
+    cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
+    
+    # Annotations with count and percentage
+    annot = np.empty_like(cm).astype(object)
+    for i in range(2):
+        for j in range(2):
+            count = cm[i, j]
+            percent = cm_norm[i, j] * 100
+            annot[i, j] = f"{count:,}\n({percent:.1f}%)"
+
+    sns.heatmap(cm, annot=annot, fmt='', cmap='Blues', 
                 xticklabels=['Pred Normal', 'Pred Anomaly'],
-                yticklabels=['True Normal', 'True Anomaly'])
-    plt.title('Confusion Matrix')
+                yticklabels=['True Normal', 'True Anomaly'],
+                annot_kws={"size": 12, "weight": "bold"}, cbar=False)
+    plt.title('Confusion Matrix', fontsize=14, fontweight='bold')
+    plt.xticks(fontsize=11)
+    plt.yticks(fontsize=11)
     
     plt.tight_layout()
-    plt.savefig(save_dir / 'evaluation_plots.png', dpi=150, bbox_inches='tight')
+    plt.savefig(save_dir / 'evaluation_plots.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     print(f"✓ Results saved to {save_dir}/")
@@ -402,6 +423,12 @@ def main():
         help='Directory to save results'
     )
     
+    parser.add_argument(
+        '--no_point_adjust',
+        action='store_true',
+        help='Disable Point Adjustment'
+    )
+    
     args = parser.parse_args()
     
     # 파일 존재 확인
@@ -421,7 +448,8 @@ def main():
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             device=args.device,
-            save_dir=args.save_dir
+            save_dir=args.save_dir,
+            use_point_adjust=not args.no_point_adjust
         )
         return 0
     except Exception as e:
