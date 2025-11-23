@@ -350,10 +350,10 @@ def evaluate(
             percent = cm_norm[i, j] * 100
             annot[i, j] = f"{count:,}\n({percent:.1f}%)"
 
-    sns.heatmap(cm, annot=annot, fmt='', cmap='Blues', 
+    sns.heatmap(cm_norm, annot=annot, fmt='', cmap='Blues', 
                 xticklabels=['Pred Normal', 'Pred Anomaly'],
                 yticklabels=['True Normal', 'True Anomaly'],
-                annot_kws={"size": 12, "weight": "bold"}, cbar=False)
+                annot_kws={"size": 12, "weight": "bold"}, cbar=True)
     plt.title('Confusion Matrix', fontsize=14, fontweight='bold')
     plt.xticks(fontsize=11)
     plt.yticks(fontsize=11)
