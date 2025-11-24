@@ -215,3 +215,4 @@ checkpoints/
 logs/
 evaluation_results/
 experiments/
+lightning_logs/
